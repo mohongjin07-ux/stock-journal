@@ -28,6 +28,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue'
 .metric-label{font-size:11px;color:#888;margin-bottom:4px}
 .metric-value{font-size:20px;font-weight:600}
 .green{color:#34c759}.red{color:#ff3b30}
+.hero{background:#fff;border-radius:12px;padding:18px 16px;margin-bottom:14px}
+.hero-label{font-size:12px;color:#888;margin-bottom:6px}
+.hero-main{display:flex;align-items:baseline;gap:10px;flex-wrap:wrap}
+.hero-value{font-size:32px;font-weight:700;letter-spacing:-0.5px}
+.hero-roi{font-size:15px;font-weight:600;color:#888}
 .tab-content{display:none}.tab-content.active{display:block}
 .card{background:#fff;border-radius:12px;padding:16px;margin-bottom:14px}
 .section-title{font-size:14px;font-weight:600;margin-bottom:12px;color:#1d1d1f}
@@ -120,6 +125,14 @@ tr:last-child td{border-bottom:none}
 </div>
 
 <div class="content">
+
+<div class="hero">
+  <div class="hero-label">累计净赚（仅交易盈亏，不含入金出金）</div>
+  <div class="hero-main">
+    <span class="hero-value" id="m-profit">$0.00</span>
+    <span class="hero-roi" id="m-roi">收益率 —</span>
+  </div>
+</div>
 
 <div class="metrics">
   <div class="metric"><div class="metric-label">账户净值</div><div class="metric-value" id="m-net">$0.00</div></div>
@@ -485,6 +498,20 @@ function renderMetrics(){
   const pnlEl=document.getElementById('m-pnl');
   pnlEl.textContent=(rpnl>=0?'+$':'-$')+Math.abs(rpnl).toFixed(2);
   pnlEl.className='metric-value '+(rpnl>=0?'green':'red');
+
+  // 累计净赚（=已实现盈亏，不含出入金）+ 收益率（累计盈亏 ÷ 总入金）
+  const profitEl=document.getElementById('m-profit');
+  profitEl.textContent=(rpnl>=0?'+$':'-$')+Math.abs(rpnl).toFixed(2);
+  profitEl.className='hero-value '+(rpnl>=0?'green':'red');
+  const roiEl=document.getElementById('m-roi');
+  if(tin>0){
+    const roi=rpnl/tin*100;
+    roiEl.textContent='收益率 '+(roi>=0?'+':'')+roi.toFixed(1)+'%';
+    roiEl.className='hero-roi '+(roi>=0?'green':'red');
+  }else{
+    roiEl.textContent='收益率 —';
+    roiEl.className='hero-roi';
+  }
 }
 
 function renderPositions(){
