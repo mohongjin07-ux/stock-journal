@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-title" content="交易日记">
 <title>美股交易日记</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text','Helvetica Neue',sans-serif;background:#f5f5f7;color:#1d1d1f;min-height:100vh;padding-bottom:80px}
@@ -74,13 +75,35 @@ tr:last-child td{border-bottom:none}
 .seg{display:grid;grid-template-columns:1fr 1fr;background:#f0f0f0;border-radius:10px;padding:3px;margin-bottom:14px}
 .seg-btn{padding:7px;background:none;border:none;border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;font-family:inherit;color:#888}
 .seg-btn.active{background:#fff;color:#1d1d1f;box-shadow:0 1px 3px rgba(0,0,0,0.1)}
+.sync-dot{display:inline-block;width:8px;height:8px;border-radius:50%;background:#ccc;margin-left:8px;vertical-align:middle;transition:background 0.3s}
+.sync-dot.on{background:#34c759}
+.sync-dot.off{background:#ff3b30}
+.pin-overlay{position:fixed;inset:0;background:#f5f5f7;z-index:2000;display:flex;align-items:center;justify-content:center;padding:20px}
+.pin-overlay.hidden{display:none}
+.pin-box{background:#fff;border-radius:16px;padding:28px 24px;width:300px;max-width:90vw;text-align:center;box-shadow:0 4px 24px rgba(0,0,0,0.08)}
+.pin-title{font-size:20px;font-weight:600;margin-bottom:4px}
+.pin-sub{font-size:13px;color:#888;margin-bottom:18px}
+.pin-field{font-size:24px;letter-spacing:8px;text-align:center;padding:12px;border-radius:12px;border:1px solid #e5e5e5;background:#f9f9f9;color:#1d1d1f;width:100%;margin-bottom:14px;-webkit-appearance:none;font-family:inherit}
+.pin-field:focus{outline:none;border-color:#007aff;background:#fff}
+.pin-err{font-size:13px;color:#ff3b30;margin-top:10px;min-height:16px}
 </style>
 </head>
 <body>
 
+<!-- PIN 解锁门 -->
+<div id="pin-overlay" class="pin-overlay">
+  <div class="pin-box">
+    <div class="pin-title">美股交易日记</div>
+    <div class="pin-sub">请输入 PIN 码</div>
+    <input type="password" id="pin-input" inputmode="numeric" maxlength="8" class="pin-field" autocomplete="off">
+    <button class="btn-primary" onclick="checkPin()">进入</button>
+    <div class="pin-err" id="pin-err"></div>
+  </div>
+</div>
+
 <div class="header">
   <div class="header-top">
-    <span class="app-title">美股交易日记</span>
+    <span class="app-title">美股交易日记<span class="sync-dot" id="sync-dot" title="云端同步状态"></span></span>
     <div class="header-actions">
       <button class="icon-btn" onclick="exportCSV()" title="导出CSV">&#8681; CSV</button>
       <button class="icon-btn" onclick="exportJSON()" title="备份数据">&#128190;</button>
@@ -225,9 +248,19 @@ tr:last-child td{border-bottom:none}
 <div class="toast" id="toast"></div>
 
 <script>
+/* =======================================================================
+   配置区 —— 部署前请填写下面 3 项（填完保存即可，不要改其它代码）
+   1) SUPABASE_URL      : Supabase 项目的 Project URL
+   2) SUPABASE_ANON_KEY : Supabase 项目的 anon public key
+   3) APP_PIN           : 你自己设定的进入 PIN 码（4-8 位数字）
+   ======================================================================= */
+const SUPABASE_URL      = 'https://lcgzjiyyvumhkrokazjy.supabase.co';
+const SUPABASE_ANON_KEY = 'sb_publishable_X3DzRLgzcLQudvUyDeh6qg_jMZu7QO3';
+const APP_PIN           = '1433223';
+/* ======================================================================= */
+
 let trades=[], cashflows=[], charts={};
-try{trades=JSON.parse(localStorage.getItem('sj_trades')||'[]')}catch(e){trades=[]}
-try{cashflows=JSON.parse(localStorage.getItem('sj_cashflows')||'[]')}catch(e){cashflows=[]}
+let sb=null;
 
 const today=new Date().toISOString().slice(0,10);
 document.getElementById('t-date').value=today;
@@ -235,13 +268,100 @@ document.getElementById('c-date').value=today;
 
 ['t-qty','t-price','t-fee'].forEach(id=>document.getElementById(id).addEventListener('input',updateTotal));
 
-function save(){
-  try{
-    localStorage.setItem('sj_trades',JSON.stringify(trades));
-    localStorage.setItem('sj_cashflows',JSON.stringify(cashflows));
-  }catch(e){}
+// 回车提交 PIN
+document.getElementById('pin-input').addEventListener('keydown',e=>{if(e.key==='Enter')checkPin();});
+
+/* ---------------- PIN 解锁 ---------------- */
+function gateInit(){
+  if(localStorage.getItem('sj_pin')===APP_PIN){ enterApp(); }
+  else { document.getElementById('pin-input').focus(); }
+}
+function checkPin(){
+  const v=document.getElementById('pin-input').value.trim();
+  if(v===APP_PIN){ localStorage.setItem('sj_pin',v); document.getElementById('pin-err').textContent=''; enterApp(); }
+  else { document.getElementById('pin-err').textContent='PIN 码错误'; }
+}
+function enterApp(){
+  document.getElementById('pin-overlay').classList.add('hidden');
+  bootstrap();
 }
 
+/* ---------------- Supabase 启动 ---------------- */
+async function bootstrap(){
+  if(SUPABASE_URL.includes('YOUR_')||SUPABASE_ANON_KEY.includes('YOUR_')){
+    toast('请先在代码顶部填写 Supabase 配置');
+    setSync('off');
+    return;
+  }
+  sb=supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY);
+  await loadData();
+  await migrateLocal();
+  setupRealtime();
+}
+
+function setSync(state){
+  const dot=document.getElementById('sync-dot');
+  dot.className='sync-dot'+(state==='on'?' on':state==='off'?' off':'');
+}
+
+// 把云端返回的字段统一转成数字，避免字符串拼接出错
+function normTrade(t){return {id:Number(t.id),date:t.date,type:t.type,ticker:t.ticker,qty:Number(t.qty),price:Number(t.price),fee:Number(t.fee||0),total:t.total==null?null:Number(t.total),pnl:t.pnl==null?null:Number(t.pnl)};}
+function normCash(c){return {id:Number(c.id),date:c.date,type:c.type,amount:Number(c.amount),note:c.note||''};}
+
+async function loadData(){
+  try{
+    const [tr,cf]=await Promise.all([
+      sb.from('trades').select('*'),
+      sb.from('cashflows').select('*')
+    ]);
+    if(tr.error)throw tr.error;
+    if(cf.error)throw cf.error;
+    trades=(tr.data||[]).map(normTrade);
+    cashflows=(cf.data||[]).map(normCash);
+    renderAll();
+    refreshActiveTab();
+  }catch(e){
+    console.error('加载失败',e);
+    toast('云端加载失败，请检查配置/网络');
+    setSync('off');
+  }
+}
+
+function refreshActiveTab(){
+  const active=document.querySelector('.tab-content.active');
+  if(!active)return;
+  if(active.id==='tab-dashboard')renderDashboard();
+  if(active.id==='tab-history')renderHistory();
+}
+
+function setupRealtime(){
+  sb.channel('sj-realtime')
+    .on('postgres_changes',{event:'*',schema:'public',table:'trades'},()=>loadData())
+    .on('postgres_changes',{event:'*',schema:'public',table:'cashflows'},()=>loadData())
+    .subscribe(status=>{
+      if(status==='SUBSCRIBED')setSync('on');
+      else if(status==='CHANNEL_ERROR'||status==='TIMED_OUT'||status==='CLOSED')setSync('off');
+    });
+}
+
+// 首次切换到云端时，自动把本机 localStorage 旧数据上传（仅当云端为空）
+async function migrateLocal(){
+  let lt=[],lc=[];
+  try{lt=JSON.parse(localStorage.getItem('sj_trades')||'[]');}catch(e){}
+  try{lc=JSON.parse(localStorage.getItem('sj_cashflows')||'[]');}catch(e){}
+  if((lt.length||lc.length) && trades.length===0 && cashflows.length===0){
+    if(confirm('检测到本机有 '+lt.length+' 条交易、'+lc.length+' 条资金记录，是否上传到云端数据库？')){
+      try{
+        if(lt.length){const {error}=await sb.from('trades').upsert(lt);if(error)throw error;}
+        if(lc.length){const {error}=await sb.from('cashflows').upsert(lc);if(error)throw error;}
+        await loadData();
+        toast('旧数据已上传到云端');
+      }catch(e){console.error(e);toast('旧数据上传失败');}
+    }
+  }
+}
+
+/* ---------------- UI 交互（与原版一致） ---------------- */
 function toast(msg){
   const el=document.getElementById('toast');
   el.textContent=msg;el.classList.add('show');
@@ -296,7 +416,7 @@ function getPositions(){
   return pos;
 }
 
-function addTrade(){
+async function addTrade(){
   const date=document.getElementById('t-date').value;
   const type=document.getElementById('t-type').value;
   const ticker=document.getElementById('t-ticker').value.trim().toUpperCase();
@@ -312,31 +432,45 @@ function addTrade(){
     if(!p||p.qty<qty){toast(ticker+' 持仓不足（'+((p&&p.qty)||0)+'股）');return;}
     pnl=(price-p.avgCost)*qty-fee;
   }
-  trades.push({id:Date.now(),date,type,ticker,qty,price,fee,total:qty*price+fee,pnl});
-  save();renderAll();clearTradeForm();
+  const row={id:Date.now(),date,type,ticker,qty,price,fee,total:qty*price+fee,pnl};
+  if(!sb){toast('未连接云端');return;}
+  const {error}=await sb.from('trades').insert(row);
+  if(error){console.error(error);toast('保存失败');return;}
+  trades.push(row);
+  renderAll();clearTradeForm();
   toast(type==='buy'?'买入已记录':'卖出已记录');
 }
 
-function addCash(){
+async function addCash(){
   const date=document.getElementById('c-date').value;
   const type=document.getElementById('c-type').value;
   const amount=parseFloat(document.getElementById('c-amount').value);
   const note=document.getElementById('c-note').value.trim();
   if(!date||!amount||amount<=0){toast('请填写日期和金额');return;}
-  cashflows.push({id:Date.now(),date,type,amount,note});
-  save();renderAll();clearCashForm();
+  const row={id:Date.now(),date,type,amount,note};
+  if(!sb){toast('未连接云端');return;}
+  const {error}=await sb.from('cashflows').insert(row);
+  if(error){console.error(error);toast('保存失败');return;}
+  cashflows.push(row);
+  renderAll();clearCashForm();
   toast(type==='in'?'入金已记录':'出金已记录');
 }
 
-function deleteTrade(id){
+async function deleteTrade(id){
   if(!confirm('确认删除此交易记录？'))return;
+  if(!sb){toast('未连接云端');return;}
+  const {error}=await sb.from('trades').delete().eq('id',id);
+  if(error){console.error(error);toast('删除失败');return;}
   trades=trades.filter(t=>t.id!==id);
-  save();renderAll();toast('已删除');
+  renderAll();renderHistory();toast('已删除');
 }
-function deleteCash(id){
+async function deleteCash(id){
   if(!confirm('确认删除此资金记录？'))return;
+  if(!sb){toast('未连接云端');return;}
+  const {error}=await sb.from('cashflows').delete().eq('id',id);
+  if(error){console.error(error);toast('删除失败');return;}
   cashflows=cashflows.filter(c=>c.id!==id);
-  save();renderAll();toast('已删除');
+  renderAll();toast('已删除');
 }
 
 function renderMetrics(){
@@ -533,7 +667,7 @@ function exportCSV(){
   [...cashflows].sort((a,b)=>a.date.localeCompare(b.date)).forEach(c=>{
     csv+=`${c.date},${c.type==='in'?'入金':'出金'},${c.amount.toFixed(2)},${c.note||''}\n`;
   });
-  downloadFile('交易记录_'+today+'.csv','data:text/csv;charset=utf-8,\uFEFF'+encodeURIComponent(csv));
+  downloadFile('交易记录_'+today+'.csv','data:text/csv;charset=utf-8,﻿'+encodeURIComponent(csv));
   toast('CSV已导出');
 }
 
@@ -547,15 +681,19 @@ function importJSON(event){
   const file=event.target.files[0];
   if(!file)return;
   const reader=new FileReader();
-  reader.onload=function(e){
+  reader.onload=async function(e){
     try{
       const data=JSON.parse(e.target.result);
       if(!data.trades||!data.cashflows){toast('文件格式不正确');return;}
-      if(!confirm('导入将覆盖当前所有数据，确认吗？'))return;
-      trades=data.trades;
-      cashflows=data.cashflows;
-      save();renderAll();toast('数据已导入');
-    }catch(err){toast('导入失败，文件格式错误');}
+      if(!confirm('导入将把这些记录写入云端数据库（已存在的同 ID 记录会被覆盖），确认吗？'))return;
+      if(!sb){toast('未连接云端');return;}
+      const it=(data.trades||[]).map(normTrade);
+      const ic=(data.cashflows||[]).map(normCash);
+      if(it.length){const {error}=await sb.from('trades').upsert(it);if(error)throw error;}
+      if(ic.length){const {error}=await sb.from('cashflows').upsert(ic);if(error)throw error;}
+      await loadData();
+      toast('数据已导入并同步');
+    }catch(err){console.error(err);toast('导入失败');}
   };
   reader.readAsText(file);
   event.target.value='';
@@ -570,7 +708,9 @@ function downloadFile(filename,dataURL){
   document.body.removeChild(a);
 }
 
+// 初始空渲染（数据加载前），然后进入 PIN 门
 renderAll();
+gateInit();
 </script>
 </body>
 </html>
